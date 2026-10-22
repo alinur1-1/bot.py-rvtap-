@@ -1,0 +1,6 @@
+aiogram
+aiohttp
+aiosqlite
+python-dotenv
+requests
+google-generativeai
