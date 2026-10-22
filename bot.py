@@ -508,3 +508,29 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+from aiohttp import web
+import os
+
+# Мини-обработчик для проверки порта от Render
+async def handle_health_check(request):
+    return web.Response(text="Bot is running 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render сам передает нужный порт в переменную PORT, а по умолчанию берем 8080
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
+async def main():
+    await init_db()  # Ваша инициализация базы данных (если она есть в main)
+    await start_web_server()  # <-- ДОБАВЛЯЕМ ЭТУ СТРОЧКУ перед polling!
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    
