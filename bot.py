@@ -29,7 +29,7 @@ ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW else 5904604582
 MANAGERS = {
     "legenda": 5904604582,       # Legenda
     "default": 5904604582,       # Дефолтный вход
-    "voronka": 5904604582,   # Кульджо хого
+    "voronka": 5904604582,       # Кульджо хого
     "teddys_coffee": 1046554693, # Teddy s Coffee
     "mondo_coffee": 1046554693,  # Mondo Coffee
 }
@@ -178,6 +178,10 @@ async def process_incoming_feedback(comment: str, contact: str, place_id: str = 
         except Exception as e:
             logging.error(f"Ошибка отправки в Telegram: {e}")
 
+# --- ПРОВЕРКА ЖИЗНИ СЕРВЕРА ДЛЯ RENDER ---
+async def handle_health_check(request: web.Request):
+    return web.Response(text="Reviews Tap API & Bot are running 24/7!")
+
 # --- API ПРИЕМА ДАННЫХ (понимает и новый, и старый формат с сайта) ---
 async def handle_feedback_api(request: web.Request):
     headers = {
@@ -255,7 +259,7 @@ async def handle_feedback_api(request: web.Request):
 # --- КЛАВИАТУРЫ ---
 def main_menu_keyboard():
     kb = [
-        [types.KeyboardButton(text="📊 Аналитика по точкам"), types.KeyboardButton(text="⚠️ Открытые жалобы")],
+        [types.KeyboardButton(text="📊 Аналитика"), types.KeyboardButton(text="⚠️ Открытые жалобы")],
         [types.KeyboardButton(text="⚙️ Помощь")]
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -313,224 +317,3 @@ async def cmd_help(message: types.Message):
         "• <b>⚠️ Открытые жалобы</b> — список необработанных инцидентов.\n"
         "• <b>/my_id</b> — ваш Telegram ID.\n"
         "• <b>/debug_db</b> — проверка записей в базе данных.",
-        parse_mode="HTML"
-    )
-
-@dp.message(F.text == "📊 Аналитика по точкам")
-@dp.message(Command("stats"))
-async def cmd_stats_router(message: types.Message):
-    user_id = message.from_user.id
-    managed_places = [p_id.lower() for p_id, m_id in MANAGERS.items() if m_id == user_id]
-
-    if user_id == ADMIN_ID or len(managed_places) > 1:
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT DISTINCT LOWER(place_id), place_name FROM feedbacks") as cur:
-                places = await cur.fetchall()
-
-        if not places:
-            await message.answer("📊 Отзывов в базе пока нет ни по одной точке.")
-            return
-
-        buttons = []
-        seen_ids = set()
-        for p_id, p_name in places:
-            if p_id not in seen_ids:
-                seen_ids.add(p_id)
-                buttons.append([InlineKeyboardButton(text=f"📍 {p_name or p_id}", callback_data=f"selplace_{p_id}")])
-
-        buttons.append([InlineKeyboardButton(text="🌐 Все заведения (сводка)", callback_data="selplace_all")])
-        await message.answer("📍 Выберите заведение для отчёта:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-        return
-
-    if managed_places:
-        await message.answer("🗓 Выберите период отчёта:", reply_markup=period_selection_keyboard(managed_places[0]))
-    else:
-        await message.answer("⛔ Нет доступа к аналитике заведений.")
-
-@dp.callback_query(F.data.startswith("selplace_"))
-async def process_place_selection(callback: CallbackQuery):
-    place_id = callback.data.replace("selplace_", "").lower()
-    await callback.message.edit_text("🗓 Выберите период отчёта:", reply_markup=period_selection_keyboard(place_id))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("rep_"))
-async def process_report_period(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    place_id = "_".join(parts[1:-1]).lower()
-    period = parts[-1]
-
-    period_labels = {"today": "за сегодня", "7days": "за последние 7 дней", "all": "за всё время"}
-    period_title = period_labels.get(period, "период")
-
-    where_clauses, params = [], []
-    if place_id != "all":
-        if place_id in ("legenda", "default"):
-            where_clauses.append("LOWER(place_id) IN ('legenda', 'default')")
-        else:
-            where_clauses.append("LOWER(place_id) = ?")
-            params.append(place_id)
-
-    if period == "today":
-        where_clauses.append("date(created_at) = date('now')")
-    elif period == "7days":
-        where_clauses.append("created_at >= datetime('now', '-7 days')")
-
-    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        if place_id == "all":
-            place_title = "Все заведения сети"
-        elif place_id in ("legenda", "default"):
-            place_title = "Legenda"
-        else:
-            async with db.execute("SELECT place_name FROM feedbacks WHERE LOWER(place_id) = ? LIMIT 1", (place_id,)) as cur:
-                row = await cur.fetchone()
-                place_title = row[0] if row and row[0] else place_id
-
-        async with db.execute(f"SELECT COUNT(*) FROM feedbacks {where_sql}", tuple(params)) as cur:
-            total = (await cur.fetchone())[0]
-
-        unresolved_sql = where_sql + (" AND status = 'новый'" if where_sql else "WHERE status = 'новый'")
-        async with db.execute(f"SELECT COUNT(*) FROM feedbacks {unresolved_sql}", tuple(params)) as cur:
-            unresolved = (await cur.fetchone())[0]
-
-        cat_group_sql = where_sql + " GROUP BY category" if where_sql else "GROUP BY category"
-        async with db.execute(f"SELECT category, COUNT(*) FROM feedbacks {cat_group_sql}", tuple(params)) as cur:
-            categories = await cur.fetchall()
-
-        recent_sql = where_sql + " ORDER BY id DESC LIMIT 10" if where_sql else "ORDER BY id DESC LIMIT 10"
-        async with db.execute(f"SELECT comment, category, created_at FROM feedbacks {recent_sql}", tuple(params)) as cur:
-            recent_reviews = await cur.fetchall()
-
-    if total == 0:
-        await callback.message.edit_text(f"📊 По точке <b>{html.escape(str(place_title))}</b> ({period_title}) обращений в базе не найдено.", parse_mode="HTML")
-        await callback.answer()
-        return
-
-    cat_text = "\n".join([f"• {c[0]}: {c[1]} шт." for c in categories]) if categories else "Категории не определены."
-    reviews_summary = "\n".join([f"- [{r[2]}] ({r[1]}): {r[0]}" for r in recent_reviews])
-
-    await callback.message.edit_text(f"⏳ Считаю данные ({period_title}) по: <b>{html.escape(str(place_title))}</b>...", parse_mode="HTML")
-
-    report_prompt = (
-        f"Ты — ресторанный бизнес-аналитик. Составь краткий отчёт по филиалу: {place_title} {period_title}.\n"
-        f"Статистика: Всего обращений: {total}, Нерешённых: {unresolved}.\n"
-        f"Категории:\n{cat_text}\n\n"
-        f"Жалобы:\n{reviews_summary}\n\n"
-        "Сделай кратко обычным текстом без символов Markdown (* или _): 1. Главные проблемы. 2. Практические шаги для персонала на неделю."
-    )
-
-    ai_text = "Проверьте тайминги отдачи блюд и стандарты вежливости официантов."
-    if ai_client:
-        try:
-            response = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-2.5-flash", contents=report_prompt)
-            if response.text:
-                ai_text = response.text.replace("**", "").replace("*", "•")
-        except Exception as e:
-            logging.warning(f"Ошибка вызова Gemini: {e}")
-
-    report = (
-        f"📊 <b>Отчёт по точке: {html.escape(str(place_title))} ({period_title})</b>\n\n"
-        f"Всего обращений: <b>{total}</b>\n"
-        f"Требуют внимания: <b>{unresolved}</b>\n\n"
-        f"🏷 <b>Категории:</b>\n{html.escape(cat_text)}\n\n"
-        f"📋 <b>Рекомендации AI для управляющего:</b>\n\n{html.escape(ai_text)}"
-    )
-    await callback.message.answer(report, parse_mode="HTML")
-    await callback.answer()
-
-@dp.message(F.text == "⚠️ Открытые жалобы")
-@dp.message(Command("open"))
-async def cmd_open(message: types.Message):
-    user_id = message.from_user.id
-    managed_places = [p_id.lower() for p_id, m_id in MANAGERS.items() if m_id == user_id]
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        if user_id == ADMIN_ID:
-            query = "SELECT id, place_name, comment, contact, created_at FROM feedbacks WHERE status = 'новый' ORDER BY id DESC LIMIT 10"
-            params = ()
-        elif managed_places:
-            place_placeholders = ','.join(['?'] * len(managed_places))
-            query = f"SELECT id, place_name, comment, contact, created_at FROM feedbacks WHERE status = 'новый' AND LOWER(place_id) IN ({place_placeholders}) ORDER BY id DESC LIMIT 10"
-            params = tuple(managed_places)
-        else:
-            await message.answer("⛔ Нет доступа.")
-            return
-
-        async with db.execute(query, params) as cursor:
-            rows = await cursor.fetchall()
-
-    if not rows:
-        await message.answer("🎉 Все жалобы обработаны! Открытых инцидентов нет.")
-        return
-
-    for row in rows:
-        fid, pname, comment, contact, created_at = row
-        text = (
-            f"⚠️ <b>Жалоба #{fid} ({html.escape(str(pname or 'Точка'))})</b>\n"
-            f"⏰ Время: {html.escape(str(created_at))}\n"
-            f"📞 Контакт: {html.escape(str(contact or 'Не указан'))}\n"
-            f"💬 Суть: {html.escape(str(comment))}"
-        )
-        await message.answer(text, reply_markup=complaint_action_keyboard(fid), parse_mode="HTML")
-
-@dp.callback_query(F.data.startswith("status_"))
-async def process_status(callback: CallbackQuery):
-    action, fid = callback.data.split("_")[1], int(callback.data.split("_")[2])
-    new_status = "связались" if action == "contacted" else "закрыто"
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE feedbacks SET status = ? WHERE id = ?", (new_status, fid))
-        await db.commit()
-
-    label = "📞 Отмечено: с гостем связались" if action == "contacted" else "✅ Инцидент закрыт"
-    await callback.message.edit_text(callback.message.text + f"\n\n{label}")
-    await callback.answer("Статус обновлен")
-
-# --- ЗАПУСК ---
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await init_db()
-
-    app = web.Application()
-    app.router.add_route("*", "/api/send-lead", handle_feedback_api)
-    app.router.add_route("*", "/api/feedback", handle_feedback_api)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    # Слушаем порт 8080
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    await site.start()
-
-    print("🚀 API сервер запущен на порту 8080 (/api/send-lead)!")
-    print("🤖 Reviews Tap бот готов к работе!")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-from aiohttp import web
-import os
-
-# Мини-обработчик для проверки порта от Render
-async def handle_health_check(request):
-    return web.Response(text="Bot is running 24/7!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    # Render сам передает нужный порт в переменную PORT, а по умолчанию берем 8080
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"Web server started on port {port}")
-
-async def main():
-    await init_db()  # Ваша инициализация базы данных (если она есть в main)
-    await start_web_server()  # <-- ДОБАВЛЯЕМ ЭТУ СТРОЧКУ перед polling!
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-    
