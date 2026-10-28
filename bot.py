@@ -18,19 +18,19 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 
 if not BOT_TOKEN:
     raise ValueError("Ошибка: BOT_TOKEN не найден в .env!")
 
-ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW else 5904604582
+ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW and ADMIN_ID_RAW.isdigit() else 5904604582
 
 # ================= МАРШРУТИЗАЦИЯ МЕНЕДЖЕРОВ =================
 MANAGERS = {
     "legenda": 5904604582,       # Legenda
     "default": 5904604582,       # Дефолтный вход
-    "voronka": 5904604582,       # Кульджо хого
-    "teddys_coffee": 1046554693, # Teddy s Coffee
+    "voronka": 5904604582,       # Voronka / Кульджо хого
+    "teddys_coffee": 1046554693, # Teddy's Coffee
     "mondo_coffee": 1046554693,  # Mondo Coffee
 }
 # =============================================================
@@ -39,6 +39,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+GEMINI_MODEL = "gemini-2.5-flash"
 DB_NAME = "reviews_tap.db"
 
 recent_submissions = {}
@@ -71,233 +72,48 @@ async def init_db():
         await db.commit()
     print("🗄 База данных успешно инициализирована!")
 
+# --- УМНАЯ ЛОКАЛЬНАЯ КЛАССИФИКАЦИЯ И ШАБЛОН (если AI недоступен) ---
 def local_classify(text: str) -> str:
     t = text.lower()
-    if any(w in t for w in ["блюд", "еда", "холодн", "вкус", "сыр", "мясо", "пицц", "кофе", "чай", "суп", "солон"]):
+    if any(w in t for w in ["блюд", "еда", "холодн", "вкус", "невкус", "сыр", "мясо", "пицц", "кофе", "чай", "суп", "солон", "пересол", "порци"]):
         return "Кухня"
-    if any(w in t for w in ["долго", "ждал", "минут", "медлен", "опоздал", "время"]):
+    if any(w in t for w in ["долго", "ждал", "минут", "медлен", "опоздал", "время", "час"]):
         return "Скорость"
-    if any(w in t for w in ["гряз", "стол", "волос", "туал", "посуд", "мусор"]):
+    if any(w in t for w in ["гряз", "стол", "волос", "туал", "посуд", "мусор", "салфет", "пыл", "таракан"]):
         return "Чистота"
-    if any(w in t for w in ["официант", "оф ", "персонал", "хам", "груб", "счет", "чек", "администратор", "не подошел"]):
+    if any(w in t for w in ["официант", "оф ", "персонал", "хам", "груб", "счет", "чек", "администратор", "не подошел", "игнор", "афк", "обслуживан"]):
         return "Сервис"
-    if any(w in t for w in ["шум", "музык", "громк", "темн", "душно", "холодно в зале"]):
+    if any(w in t for w in ["шум", "музык", "громк", "темн", "душно", "холодно в зале", "кондиционер", "диван"]):
         return "Атмосфера"
     return "Общее"
 
-# --- AI АНАЛИЗАТОР ---
-# --- AI АНАЛИЗАТОР И ГЕНЕРАТОР ОТВЕТОВ ---
-async def analyze_complaint_with_ai(complaint_text: str):
-    cat_default = local_classify(complaint_text)
-    reply_default = (
-        "Здравствуйте! Приносим искренние извинения за неприятный опыт. "
-        "Мы уже разбираем эту ситуацию с командой и хотим лично связаться с вами, чтобы исправить впечатление."
-    )
-
-    if not ai_client:
-        return cat_default, "Недовольство", reply_default
-
-    prompt = (
-        "Ты — профессиональный управляющий сервисом заведения. Клиент оставил негативный отзыв:\n"
-        f"\"{complaint_text}\"\n\n"
-        "Выполни три задачи:\n"
-        "1) Определи категорию проблемы (выбери строго из: Кухня, Сервис, Чистота, Скорость, Атмосфера, Общее).\n"
-        "2) Определи эмоциональный тон (Критический, Недовольство, Разочарование).\n"
-        "3) Напиши вежливый, персонализированный ответ от лица руководства заведения. "
-        "Ответ должен адресовать конкретную проблему из текста клиента, принести извинения и предложить решение/комплимент. "
-        "Не используй символы разметки Markdown (* или _).\n\n"
-        "Формат ответа строго такой:\n"
-        "КАТЕГОРИЯ: <категория>\n"
-        "ТОН: <тон>\n"
-        "ОТВЕТ: <текст уникального ответа гостю>"
-    )
-
-    try:
-        response = await asyncio.to_thread(
-            ai_client.models.generate_content,
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        content = response.text or ""
-        category, sentiment, reply_draft = cat_default, "Недовольство", reply_default
-
-        for line in content.split("\n"):
-            if line.startswith("КАТЕГОРИЯ:"):
-                category = line.replace("КАТЕГОРИЯ:", "").strip()
-            elif line.startswith("ТОН:"):
-                sentiment = line.replace("ТОН:", "").strip()
-            elif line.startswith("ОТВЕТ:"):
-                # Собираем всё, что идет после ОТВЕТ:
-                parts = content.split("ОТВЕТ:")
-                if len(parts) > 1:
-                    reply_draft = parts[1].strip()
-
-        return category, sentiment, reply_draft
-    except Exception as e:
-        logging.warning(f"Gemini API ошибка генерации ответа: {e}")
-        return cat_default, "Недовольство", reply_default
-
-
-
-# --- СОХРАНЕНИЕ И ОТПРАВКА УВЕДОМЛЕНИЯ ---
-# Собираем тексты последних жалоб для глубокого анализа ИИ
-    reviews_text_block = "\n".join([f"- [{r[2]}] Категория: {r[1]} | Жалоба: {r[0]}" for r in recent_reviews])
-
-    report_prompt = (
-        f"Ты — опытный бизнес-аналитик ресторанной сферы и контроля качества.\n"
-        f"Проведи глубокий анализ отзывов по филиалу: {place_title} ({period_title}).\n"
-        f"Статистика: Всего обращений: {total}, Требуют внимания: {unresolved}.\n"
-        f"Категории проблем:\n{cat_text}\n\n"
-        f"Реальные тексты жалоб гостей:\n{reviews_text_block}\n\n"
-        "Дай жесткий, но конструктивный бизнес-анализ в формате обычного текста (без символов Markdown вроде * или _):\n"
-        "1. В чем конкретно и почему проседает заведение на основе этих жалоб?\д"
-        "2. Практические и пошаговые антикризисные меры для управляющего и персонала на эту неделю для устранения этих причин."
-    )
-
-    ai_text = "Проанализируйте динамику жалоб, усильте контроль качества на смене и проведите работу с персоналом."
-    if ai_client:
-        try:
-            response = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-2.5-flash", contents=report_prompt)
-            if response.text:
-                ai_text = response.text.replace("**", "").replace("*", "•")
-        except Exception as e:
-            logging.warning(f"Ошибка вызова Gemini для аналитики: {e}")
-# --- ПРОВЕРКА ЖИЗНИ СЕРВЕРА ДЛЯ RENDER ---
-async def handle_health_check(request: web.Request):
-    return web.Response(text="Reviews Tap API & Bot are running 24/7!")
-
-# --- API ПРИЕМА ДАННЫХ (понимает и новый, и старый формат с сайта) ---
-async def handle_feedback_api(request: web.Request):
-    headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-        "Access-Control-Allow-Headers": "*"
+def build_smart_fallback_reply(place_name: str, category: str, comment: str) -> str:
+    short_issue = comment.strip()
+    if len(short_issue) > 90:
+        short_issue = short_issue[:90].rstrip() + "..."
+    
+    cat_apology = {
+        "Кухня": "Нам очень жаль, что качество блюд и кухни не оправдало ваших ожиданий — мы уже передали ваше замечание шеф-повару на разбор.",
+        "Сервис": "Приносим искренние извинения за работу персонала — такое отношение к гостям недопустимо, управляющий уже проводит разбор смены.",
+        "Скорость": "Простите за долгое ожидание заказа — мы разбираемся, почему возникла задержка на смене, чтобы исключить такие накладки.",
+        "Чистота": "Приносим извинения за упущение по чистоте — мы уже усилили контроль за состоянием зала и рабочих зон.",
+        "Атмосфера": "Спасибо, что обратили внимание на комфорт в зале — мы обязательно скорректируем эти детали.",
+        "Общее": f"Нам очень жаль, что у вас сложилось такое впечатление («{short_issue}»). Мы уже передали ваше обращение руководству для детальной проверки."
     }
-
-    if request.method == "OPTIONS":
-        return web.Response(status=200, headers=headers)
-
-    try:
-        data = {}
-        if request.method == "GET":
-            data = dict(request.query)
-        else:
-            try:
-                data = await request.json()
-            except Exception:
-                raw_text = await request.text()
-                if raw_text:
-                    data = json.loads(raw_text)
-
-        place_id = str(data.get("place_id", "")).strip().lower()
-        place_name = str(data.get("place_name", "")).strip()
-        comment = str(data.get("comment", "")).strip()
-        contact = str(data.get("contact", "")).strip()
-        chat_id_raw = data.get("chat_id")
-        custom_chat_id = int(chat_id_raw) if str(chat_id_raw).isdigit() else None
-
-        # ФОЛБЭК: если браузер прислал старый формат { chat_id, text: "..." }
-        if not comment and "text" in data:
-            raw_msg = str(data["text"])
-            m_place = re.search(r"Заведение:</b>\s*(.+?)\s*\((?:<code>)?(.+?)(?:</code>)?\)", raw_msg)
-            if m_place:
-                place_name = m_place.group(1).strip()
-                place_id = m_place.group(2).strip().lower()
-            m_prob = re.search(r"Проблема:</b>\s*(.+?)\s*👤", raw_msg, re.DOTALL)
-            if m_prob:
-                comment = m_prob.group(1).strip()
-            m_cont = re.search(r"Контакт клиента:</b>\s*(.+)", raw_msg)
-            if m_cont:
-                contact = m_cont.group(1).strip()
-            if not comment:
-                comment = raw_msg
-
-        if not place_id or place_id == "default":
-            if custom_chat_id == 1046554693:
-                place_id = "kuldjo_hogo"
-                place_name = place_name or "Кульджо хого"
-            else:
-                place_id = "legenda"
-                place_name = place_name or "Legenda"
-
-        if not place_name:
-            place_name = "Кульджо хого" if place_id == "kuldjo_hogo" else "Legenda"
-
-        if not comment:
-            return web.json_response({"ok": False, "status": "empty", "description": "Пустой комментарий"}, status=200, headers=headers)
-
-        dedup_key = f"{place_id}:{comment}:{contact}"
-        now = time.time()
-        if dedup_key in recent_submissions and (now - recent_submissions[dedup_key]) < 10:
-            return web.json_response({"ok": True, "status": "duplicate_skipped"}, status=200, headers=headers)
-        
-        recent_submissions[dedup_key] = now
-        print(f"📥 ПРИШЕЛ ЗАПРОС С САЙТА: [{place_name} | ID: {place_id}] {comment} ({contact})")
-
-        asyncio.create_task(process_incoming_feedback(comment, contact, place_id, place_name, custom_chat_id))
-        return web.json_response({"ok": True, "status": "ok"}, status=200, headers=headers)
-    except Exception as e:
-        logging.error(f"Ошибка в handle_feedback_api: {e}")
-        return web.json_response({"ok": False, "error": str(e), "description": str(e)}, status=500, headers=headers)
-
-# --- КЛАВИАТУРЫ ---
-def main_menu_keyboard():
-    kb = [
-        [types.KeyboardButton(text="📊 Аналитика"), types.KeyboardButton(text="⚠️ Открытые жалобы")],
-        [types.KeyboardButton(text="⚙️ Помощь")]
-    ]
-    return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
-def complaint_action_keyboard(feedback_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📞 Связались с гостем", callback_data=f"status_contacted_{feedback_id}"),
-            InlineKeyboardButton(text="✅ Закрыть инцидент", callback_data=f"status_resolved_{feedback_id}")
-        ]
-    ])
-
-def period_selection_keyboard(place_id: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📅 За сегодня", callback_data=f"rep_{place_id}_today")],
-        [InlineKeyboardButton(text="🗓 За последние 7 дней", callback_data=f"rep_{place_id}_7days")],
-        [InlineKeyboardButton(text="📈 За всё время", callback_data=f"rep_{place_id}_all")]
-    ])
-
-# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "👋 <b>Reviews Tap Multi-Place активна!</b>\n\n"
-        "Отзывы поступают с сайта, сохраняются в БД и направляются управляющим филиалов.\n"
-        "• Узнать персональный ID: <code>/my_id</code>\n"
-        "• Проверить базу данных: <code>/debug_db</code>",
-        reply_markup=main_menu_keyboard(),
-        parse_mode="HTML"
+    apology_line = cat_apology.get(category, cat_apology["Общее"])
+    return (
+        f"Здравствуйте! Спасибо за ваш честный сигнал по заведению «{place_name}». "
+        f"{apology_line} "
+        f"Мы очень дорожим вашей обратной связью и будем рады лично исправить впечатление и подготовить для вас комплимент от заведения при следующем визите!"
     )
 
-@dp.message(Command("my_id"))
-async def cmd_my_id(message: types.Message):
-    await message.answer(f"🆔 Ваш Telegram ID: <code>{message.from_user.id}</code>", parse_mode="HTML")
-
-@dp.message(Command("debug_db"))
-async def debug_db(message: types.Message):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT id, place_id, status, comment FROM feedbacks ORDER BY id DESC LIMIT 10") as cur:
-            rows = await cur.fetchall()
-    if not rows:
-        await message.answer("🗄 <b>База данных полностью пуста!</b>", parse_mode="HTML")
-    else:
-        text = "📋 <b>Последние записи в БД:</b>\n\n"
-        for r in rows:
-            text += f"ID: #{r[0]} | Точка: <code>{r[1]}</code> | Статус: <b>{r[2]}</b>\nТекст: {html.escape(str(r[3]))}\n──────────────\n"
-        await message.answer(text, parse_mode="HTML")
-
-@dp.message(F.text == "⚙️ Помощь")
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer(
-        "⚙️ <b>Панель управления Reviews Tap:</b>\n\n"
-        "• <b>📊 Аналитика по точкам</b> — формирование сводок с рекомендациями AI.\n"
-        "• <b>⚠️ Открытые жалобы</b> — список необработанных инцидентов.\n"
-        "• <b>/my_id</b> — ваш Telegram ID.\n"
-        "• <b>/debug_db</b> — проверка записей в базе данных.",
+def build_smart_fallback_analytics(place_title: str, total: int, unresolved: int, categories: list, reviews: list) -> str:
+    top_cat = categories[0][0] if categories else "Общее"
+    sample_issues = "\n".join([f"• «{r[0][:100]}...» ({r[1]})" if len(r[0]) > 100 else f"• «{r[0]}» ({r[1]})" for r in reviews[:5]])
+    return (
+        f"1. Где проседает «{place_title}»:\n"
+        f"Основной удар приходится на категорию «{top_cat}». Из {total} обращений не закрыто {unresolved}.\n"
+        f"Ключевые сигналы от гостей:\n{sample_issues}\n\n"
+        f"2. Как исправить ситуацию на этой неделе:\n"
+        f"• Разобрать каждый открытый инцидент с персоналом смены по факту конкретных жалоб выше.\n"
+        f"• Ли
