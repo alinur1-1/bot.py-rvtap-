@@ -86,26 +86,30 @@ def local_classify(text: str) -> str:
     return "Общее"
 
 # --- AI АНАЛИЗАТОР ---
+# --- AI АНАЛИЗАТОР И ГЕНЕРАТОР ОТВЕТОВ ---
 async def analyze_complaint_with_ai(complaint_text: str):
     cat_default = local_classify(complaint_text)
     reply_default = (
-        "Здравствуйте! Приносим свои извинения за сложившуюся ситуацию. "
-        "Мы передали отзыв руководству и подготовим комплимент при следующем визите."
+        "Здравствуйте! Приносим искренние извинения за неприятный опыт. "
+        "Мы уже разбираем эту ситуацию с командой и хотим лично связаться с вами, чтобы исправить впечатление."
     )
 
     if not ai_client:
         return cat_default, "Недовольство", reply_default
 
     prompt = (
-        "Ты — AI-ассистент контроля сервиса заведений. "
-        "Проанализируй жалобу клиента: " + complaint_text + "\n\n"
-        "Выдели: 1) Категорию (Кухня, Сервис, Чистота, Скорость, Атмосфера). "
-        "2) Эмоциональный тон (Критический, Недовольство, Разочарование). "
-        "3) Предложи вежливый ответ от управляющего с комплиментом (без символов разметки Markdown).\n"
-        "Формат строго:\n"
+        "Ты — профессиональный управляющий сервисом заведения. Клиент оставил негативный отзыв:\n"
+        f"\"{complaint_text}\"\n\n"
+        "Выполни три задачи:\n"
+        "1) Определи категорию проблемы (выбери строго из: Кухня, Сервис, Чистота, Скорость, Атмосфера, Общее).\n"
+        "2) Определи эмоциональный тон (Критический, Недовольство, Разочарование).\n"
+        "3) Напиши вежливый, персонализированный ответ от лица руководства заведения. "
+        "Ответ должен адресовать конкретную проблему из текста клиента, принести извинения и предложить решение/комплимент. "
+        "Не используй символы разметки Markdown (* или _).\n\n"
+        "Формат ответа строго такой:\n"
         "КАТЕГОРИЯ: <категория>\n"
         "ТОН: <тон>\n"
-        "ОТВЕТ: <текст ответа>"
+        "ОТВЕТ: <текст уникального ответа гостю>"
     )
 
     try:
@@ -123,61 +127,41 @@ async def analyze_complaint_with_ai(complaint_text: str):
             elif line.startswith("ТОН:"):
                 sentiment = line.replace("ТОН:", "").strip()
             elif line.startswith("ОТВЕТ:"):
-                reply_draft = content.split("ОТВЕТ:")[1].strip()
+                # Собираем всё, что идет после ОТВЕТ:
+                parts = content.split("ОТВЕТ:")
+                if len(parts) > 1:
+                    reply_draft = parts[1].strip()
 
         return category, sentiment, reply_draft
     except Exception as e:
-        logging.warning(f"Gemini API пропущен: {e}")
+        logging.warning(f"Gemini API ошибка генерации ответа: {e}")
         return cat_default, "Недовольство", reply_default
 
+
+
 # --- СОХРАНЕНИЕ И ОТПРАВКА УВЕДОМЛЕНИЯ ---
-async def process_incoming_feedback(comment: str, contact: str, place_id: str = "legenda", place_name: str = "Legenda", custom_chat_id: int = None):
-    place_id_clean = place_id.strip().lower()
-    category, sentiment, reply_draft = await analyze_complaint_with_ai(comment)
+# Собираем тексты последних жалоб для глубокого анализа ИИ
+    reviews_text_block = "\n".join([f"- [{r[2]}] Категория: {r[1]} | Жалоба: {r[0]}" for r in recent_reviews])
 
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            cursor = await db.execute(
-                "INSERT INTO feedbacks (place_id, place_name, source, comment, contact, category, sentiment, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'новый')",
-                (place_id_clean, place_name, "NFC Стойка", comment, contact, category, sentiment)
-            )
-            await db.commit()
-            feedback_id = cursor.lastrowid
-        print(f"💾 УСПЕШНО СОХРАНЕНО В БД! ID: #{feedback_id} | Точка: {place_id_clean} ({place_name})")
-    except Exception as db_err:
-        print(f"❌ ОШИБКА ЗАПИСИ В БД: {db_err}")
-        return
-
-    safe_place = html.escape(str(place_name))
-    safe_id = html.escape(str(place_id_clean))
-    safe_cat = html.escape(str(category))
-    safe_sent = html.escape(str(sentiment))
-    safe_contact = html.escape(str(contact or "Не указаны"))
-    safe_comment = html.escape(str(comment))
-    safe_reply = html.escape(str(reply_draft))
-
-    notification_html = (
-        f"🚨 <b>Негативный отзыв / Жалоба #{feedback_id}</b>\n"
-        f"📍 <b>Заведение:</b> {safe_place} (<code>{safe_id}</code>)\n\n"
-        f"🏷 <b>Категория:</b> #{safe_cat} ({safe_sent})\n"
-        f"📝 <b>Проблема:</b>\n{safe_comment}\n\n"
-        f"👤 <b>Контакт клиента:</b> {safe_contact}\n\n"
-        f"🤖 <b>Рекомендуемый ответ гостю:</b>\n<i>{safe_reply}</i>"
+    report_prompt = (
+        f"Ты — опытный бизнес-аналитик ресторанной сферы и контроля качества.\n"
+        f"Проведи глубокий анализ отзывов по филиалу: {place_title} ({period_title}).\n"
+        f"Статистика: Всего обращений: {total}, Требуют внимания: {unresolved}.\n"
+        f"Категории проблем:\n{cat_text}\n\n"
+        f"Реальные тексты жалоб гостей:\n{reviews_text_block}\n\n"
+        "Дай жесткий, но конструктивный бизнес-анализ в формате обычного текста (без символов Markdown вроде * или _):\n"
+        "1. В чем конкретно и почему проседает заведение на основе этих жалоб?\д"
+        "2. Практические и пошаговые антикризисные меры для управляющего и персонала на эту неделю для устранения этих причин."
     )
 
-    target_chat_id = MANAGERS.get(place_id_clean) or custom_chat_id or ADMIN_ID
-    if target_chat_id:
+    ai_text = "Проанализируйте динамику жалоб, усильте контроль качества на смене и проведите работу с персоналом."
+    if ai_client:
         try:
-            await bot.send_message(
-                chat_id=int(target_chat_id),
-                text=notification_html,
-                reply_markup=complaint_action_keyboard(feedback_id),
-                parse_mode="HTML"
-            )
-            print(f"✅ Уведомление #{feedback_id} с кнопками отправлено в Telegram (ID: {target_chat_id})")
+            response = await asyncio.to_thread(ai_client.models.generate_content, model="gemini-2.5-flash", contents=report_prompt)
+            if response.text:
+                ai_text = response.text.replace("**", "").replace("*", "•")
         except Exception as e:
-            logging.error(f"Ошибка отправки в Telegram: {e}")
-
+            logging.warning(f"Ошибка вызова Gemini для аналитики: {e}")
 # --- ПРОВЕРКА ЖИЗНИ СЕРВЕРА ДЛЯ RENDER ---
 async def handle_health_check(request: web.Request):
     return web.Response(text="Reviews Tap API & Bot are running 24/7!")
