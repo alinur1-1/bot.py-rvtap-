@@ -39,7 +39,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
 DB_NAME = "reviews_tap.db"
 
 recent_submissions = {}
