@@ -138,7 +138,7 @@ async def process_incoming_feedback(comment: str, contact: str, place_id: str = 
             logging.error(f"❌ Ошибка отправки в Telegram: {e}")
 
 async def handle_health_check(request: web.Request):
-    return web.Response(text="Reviews Tap API & Supabase Bot are running 24/7!")
+    return web.Response(text="Reviews Tap API & Bot are running 24/7!")
 
 async def handle_feedback_api(request: web.Request):
     headers = {
@@ -237,8 +237,10 @@ def period_selection_keyboard(place_id: str):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 <b>Reviews Tap Supabase Bot активен!</b>\n\n"
-        "Данные надежно сохраняются в облаке Supabase.",
+        "👋 <b>Reviews Tap Analytics!</b>\n\n"
+        "Система мониторинга негатива и жесткой бизнес-аналитики заведений.\n"
+        "• 📊 Аналитика по точкам — сухие факты и антикризисный план.\n"
+        "• ⚠️ Открытые жалобы — список необработанных инцидентов.",
         reply_markup=main_menu_keyboard(),
         parse_mode="HTML"
     )
@@ -256,9 +258,9 @@ async def debug_db(message: types.Message):
         await conn.close()
 
     if not rows:
-        await message.answer("🗄 <b>База данных в Supabase полностью пуста!</b>", parse_mode="HTML")
+        await message.answer("🗄 <b>База данных полностью пуста!</b>", parse_mode="HTML")
     else:
-        text = "📋 <b>Последние записи в Supabase:</b>\n\n"
+        text = "📋 <b>Последние записи в базе:</b>\n\n"
         for r in rows:
             text += f"ID: #{r['id']} | Точка: <code>{r['place_id']}</code> | Статус: <b>{r['status']}</b>\nТекст: {html.escape(str(r['comment']))}\n──────────────\n"
         await message.answer(text, parse_mode="HTML")
@@ -268,7 +270,7 @@ async def debug_db(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "⚙️ <b>Панель управления:</b>\n\n"
-        "• <b>📊 Аналитика по точкам</b> — жесткий операционный разбор.\n"
+        "• <b>📊 Аналитика по точкам</b> — операционный разбор.\n"
         "• <b>⚠️ Открытые жалобы</b> — необработанные инциденты.",
         parse_mode="HTML"
     )
@@ -370,7 +372,8 @@ async def process_report_period(callback: CallbackQuery):
     cat_inline = ", ".join([f"{c['category']} ({c['cnt']})" for c in categories])
     reviews_summary = "\n".join([f"- [{r['category']}] «{r['comment']}»" for r in recent_reviews])
 
-    await callback.message.edit_text(f"⏳ Анализирую данные из Supabase по точке <b>{html.escape(str(place_title))}</b> ({period_title})...", parse_mode="HTML")
+    # Изменили текст загрузки на более лаконичный
+    await callback.message.edit_text(f"⏳ Готовлю аналитический отчёт по точке <b>{html.escape(str(place_title))}</b> ({period_title})...", parse_mode="HTML")
 
     report_prompt = (
         f"Ты — жесткий операционный директор ресторанного бизнеса. "
@@ -400,7 +403,7 @@ async def process_report_period(callback: CallbackQuery):
 
     resolved_count = total - unresolved
     report = (
-        f"📊 <b>Операционный отчёт (Supabase): {html.escape(str(place_title))} ({period_title})</b>\n\n"
+        f"📊 <b>Операционный отчёт: {html.escape(str(place_title))} ({period_title})</b>\n\n"
         f"📥 Всего: <b>{total}</b> | ✅ Закрыто: <b>{resolved_count}</b> | ⚠️ Открыто: <b>{unresolved}</b>\n"
         f"🏷 <b>Категории:</b> {html.escape(cat_inline)}\n\n"
         f"🎯 <b>Фактический разбор и план действий:</b>\n\n{html.escape(ai_text)}"
