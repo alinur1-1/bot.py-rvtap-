@@ -19,7 +19,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
 if not BOT_TOKEN:
     raise ValueError("Ошибка: BOT_TOKEN не найден в .env!")
@@ -42,12 +42,15 @@ GEMINI_MODEL = "gemini-3.8-flash"
 
 recent_submissions = {}
 
+async def get_db_conn():
+    return await asyncpg.connect(DATABASE_URL, statement_cache_size=0)
+
 # --- ИНИЦИАЛИЗАЦИЯ ОБЛАЧНОЙ БД SUPABASE ---
 async def init_db():
     if not DATABASE_URL:
         print("❌ ОШИБКА: DATABASE_URL не задан в переменных окружения!")
         return
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await get_db_conn()
     try:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS feedbacks (
@@ -88,7 +91,7 @@ async def process_incoming_feedback(comment: str, contact: str, place_id: str = 
     sentiment = "Недовольство"
 
     feedback_id = 0
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await get_db_conn()
     try:
         row = await conn.fetchrow(
             """
@@ -98,7 +101,7 @@ async def process_incoming_feedback(comment: str, contact: str, place_id: str = 
             """,
             place_id_clean, place_name, "NFC Стойка", comment, contact, category, sentiment
         )
-        feedback_id = row['id']
+        feedback_id = row["id"]
         print(f"💾 СОХРАНЕНО В SUPABASE! ID: #{feedback_id}")
     except Exception as db_err:
         print(f"❌ ОШИБКА ЗАПИСИ В SUPABASE: {db_err}")
@@ -169,6 +172,21 @@ async def handle_feedback_api(request: web.Request):
         chat_id_raw = data.get("chat_id")
         custom_chat_id = int(chat_id_raw) if str(chat_id_raw).isdigit() else None
 
+        if not comment and "text" in data:
+            raw_msg = str(data["text"])
+            m_place = re.search(r"Заведение:</b>\s*(.+?)\s*\((?:<code>)?(.+?)(?:</code>)?\)", raw_msg)
+            if m_place:
+                place_name = m_place.group(1).strip()
+                place_id = m_place.group(2).strip().lower()
+            m_prob = re.search(r"Проблема:</b>\s*(.+?)(?:\s*👤|\s*Контакт|$)", raw_msg, re.DOTALL)
+            if m_prob:
+                comment = m_prob.group(1).strip()
+            m_cont = re.search(r"Контакт клиента:</b>\s*(.+)", raw_msg, re.DOTALL)
+            if m_cont:
+                contact = m_cont.group(1).strip()
+            if not comment:
+                comment = raw_msg.strip()
+
         if not place_id or place_id == "default":
             if custom_chat_id == 1046554693:
                 place_id = "kuldjo_hogo"
@@ -231,7 +249,7 @@ async def cmd_my_id(message: types.Message):
 
 @dp.message(Command("debug_db"))
 async def debug_db(message: types.Message):
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await get_db_conn()
     try:
         rows = await conn.fetch("SELECT id, place_id, status, comment FROM feedbacks ORDER BY id DESC LIMIT 10")
     finally:
@@ -261,9 +279,9 @@ async def cmd_stats_router(message: types.Message):
     user_id = message.from_user.id
     managed_places = [p_id.lower() for p_id, m_id in MANAGERS.items() if m_id == user_id]
 
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await get_db_conn()
     try:
-        places_raw = await conn.fetch("SELECT DISTINCT LOWER(place_id), place_name FROM feedbacks")
+        places_raw = await conn.fetch("SELECT DISTINCT LOWER(place_id) AS pid, place_name FROM feedbacks")
     finally:
         await conn.close()
 
@@ -275,7 +293,7 @@ async def cmd_stats_router(message: types.Message):
         buttons = []
         seen_ids = set()
         for r in places_raw:
-            p_id, p_name = r['lower'], r['place_name']
+            p_id, p_name = r["pid"], r["place_name"]
             if p_id not in seen_ids:
                 seen_ids.add(p_id)
                 buttons.append([InlineKeyboardButton(text=f"📍 {p_name or p_id}", callback_data=f"selplace_{p_id}")])
@@ -308,20 +326,20 @@ async def process_report_period(callback: CallbackQuery):
     idx = 1
     if place_id != "all":
         if place_id in ("legenda", "default"):
-            where_clauses.append(f"LOWER(place_id) IN ('legenda', 'default')")
+            where_clauses.append("LOWER(place_id) IN ('legenda', 'default')")
         else:
             where_clauses.append(f"LOWER(place_id) = ${idx}")
             params.append(place_id)
             idx += 1
 
     if period == "today":
-        where_clauses.append(f"DATE(created_at) = CURRENT_DATE")
+        where_clauses.append("DATE(created_at) = CURRENT_DATE")
     elif period == "7days":
-        where_clauses.append(f"created_at >= NOW() - INTERVAL '7 days'")
+        where_clauses.append("created_at >= NOW() - INTERVAL '7 days'")
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await get_db_conn()
     try:
         if place_id == "all":
             place_title = "Все заведения сети"
@@ -329,16 +347,16 @@ async def process_report_period(callback: CallbackQuery):
             place_title = "Legenda"
         else:
             row_p = await conn.fetchrow("SELECT place_name FROM feedbacks WHERE LOWER(place_id) = $1 LIMIT 1", place_id)
-            place_title = row_p['place_name'] if row_p and row_p['place_name'] else place_id
+            place_title = row_p["place_name"] if row_p and row_p["place_name"] else place_id
 
-        total_row = await conn.fetchrow(f"SELECT COUNT(*) FROM feedbacks {where_sql}", *params)
-        total = total_row['count']
+        total_row = await conn.fetchrow(f"SELECT COUNT(*) AS cnt FROM feedbacks {where_sql}", *params)
+        total = total_row["cnt"]
 
-        unres_sql = where_sql + (" AND status = 'new'" if "WHERE" in where_sql else " WHERE status = 'новый'") # на всякий случай
-        unres_row = await conn.fetchrow(f"SELECT COUNT(*) FROM feedbacks WHERE status = 'новый'" + ((" AND " + " AND ".join(where_clauses)) if where_clauses else ""), *params)
-        unresolved = unres_row['count']
+        unres_where = "WHERE status = 'новый'" + ((" AND " + " AND ".join(where_clauses)) if where_clauses else "")
+        unres_row = await conn.fetchrow(f"SELECT COUNT(*) AS cnt FROM feedbacks {unres_where}", *params)
+        unresolved = unres_row["cnt"]
 
-        categories = await conn.fetch(f"SELECT category, COUNT(*) FROM feedbacks {where_sql} GROUP BY category ORDER BY COUNT(*) DESC", *params)
+        categories = await conn.fetch(f"SELECT category, COUNT(*) AS cnt FROM feedbacks {where_sql} GROUP BY category ORDER BY COUNT(*) DESC", *params)
         recent_reviews = await conn.fetch(f"SELECT comment, category, status, created_at FROM feedbacks {where_sql} ORDER BY id DESC LIMIT 50", *params)
     finally:
         await conn.close()
@@ -348,7 +366,8 @@ async def process_report_period(callback: CallbackQuery):
         await callback.answer()
         return
 
-    cat_text = "\n".join([f"• {c['category']}: {c['count']} шт." for c in categories]) if categories else "Категории не определены."
+    cat_text = "\n".join([f"• {c['category']}: {c['cnt']} шт." for c in categories]) if categories else "Категории не определены."
+    cat_inline = ", ".join([f"{c['category']} ({c['cnt']})" for c in categories])
     reviews_summary = "\n".join([f"- [{r['category']}] «{r['comment']}»" for r in recent_reviews])
 
     await callback.message.edit_text(f"⏳ Анализирую данные из Supabase по точке <b>{html.escape(str(place_title))}</b> ({period_title})...", parse_mode="HTML")
@@ -383,7 +402,7 @@ async def process_report_period(callback: CallbackQuery):
     report = (
         f"📊 <b>Операционный отчёт (Supabase): {html.escape(str(place_title))} ({period_title})</b>\n\n"
         f"📥 Всего: <b>{total}</b> | ✅ Закрыто: <b>{resolved_count}</b> | ⚠️ Открыто: <b>{unresolved}</b>\n"
-        f"🏷 <b>Категории:</b> {html.escape(', '.join([f\"{c['category']} ({c['count']})\" for c in categories]))}\n\n"
+        f"🏷 <b>Категории:</b> {html.escape(cat_inline)}\n\n"
         f"🎯 <b>Фактический разбор и план действий:</b>\n\n{html.escape(ai_text)}"
     )
     if len(report) > 4000:
@@ -397,7 +416,7 @@ async def cmd_open(message: types.Message):
     user_id = message.from_user.id
     managed_places = [p_id.lower() for p_id, m_id in MANAGERS.items() if m_id == user_id]
 
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await get_db_conn()
     try:
         if user_id == ADMIN_ID:
             rows = await conn.fetch("SELECT id, place_name, comment, contact, created_at FROM feedbacks WHERE status = 'новый' ORDER BY id DESC LIMIT 10")
@@ -420,14 +439,14 @@ async def cmd_open(message: types.Message):
             f"📞 Контакт: <code>{html.escape(str(row['contact'] or 'Не указан'))}</code>\n"
             f"💬 Суть: {html.escape(str(row['comment']))}"
         )
-        await message.answer(text, reply_markup=complaint_action_keyboard(row['id']), parse_mode="HTML")
+        await message.answer(text, reply_markup=complaint_action_keyboard(row["id"]), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("status_"))
 async def process_status(callback: CallbackQuery):
     action, fid = callback.data.split("_")[1], int(callback.data.split("_")[2])
     new_status = "связались" if action == "contacted" else "закрыто"
 
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await get_db_conn()
     try:
         await conn.execute("UPDATE feedbacks SET status = $1 WHERE id = $2", new_status, fid)
     finally:
