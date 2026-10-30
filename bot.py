@@ -6,9 +6,10 @@ import json
 import time
 import html
 import asyncpg
+import aiohttp
+from aiohttp import web
 from dotenv import load_dotenv
 
-from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -20,6 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+RENDER_EXTERNAL_URL = (os.getenv("RENDER_EXTERNAL_URL") or "https://bot-py-rvtap.onrender.com").rstrip("/")
 
 if not BOT_TOKEN:
     raise ValueError("Ошибка: BOT_TOKEN не найден в .env!")
@@ -48,7 +50,7 @@ async def get_db_conn():
 # --- ИНИЦИАЛИЗАЦИЯ ОБЛАЧНОЙ БД SUPABASE ---
 async def init_db():
     if not DATABASE_URL:
-        print("❌ ОШИБКА: DATABASE_URL не задан в переменных окружения!")
+        logging.error("❌ ОШИБКА: DATABASE_URL не задан в переменных окружения!")
         return
     conn = await get_db_conn()
     try:
@@ -66,7 +68,7 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        print("🗄 Облачная база данных Supabase успешно инициализирована!")
+        logging.info("🗄 Облачная база данных успешно инициализирована!")
     finally:
         await conn.close()
 
@@ -84,7 +86,7 @@ def local_classify(text: str) -> str:
         return "Атмосфера"
     return "Общее"
 
-# --- СОХРАНЕНИЕ В SUPABASE И ОТПРАВКА В ТГ ---
+# --- СОХРАНЕНИЕ В БД И ОТПРАВКА В ТГ ---
 async def process_incoming_feedback(comment: str, contact: str, place_id: str = "legenda", place_name: str = "Legenda", custom_chat_id: int = None):
     place_id_clean = (place_id or "legenda").strip().lower()
     category = local_classify(comment)
@@ -102,9 +104,9 @@ async def process_incoming_feedback(comment: str, contact: str, place_id: str = 
             place_id_clean, place_name, "NFC Стойка", comment, contact, category, sentiment
         )
         feedback_id = row["id"]
-        print(f"💾 СОХРАНЕНО В SUPABASE! ID: #{feedback_id}")
+        logging.info(f"💾 СОХРАНЕНО В БД! ID: #{feedback_id}")
     except Exception as db_err:
-        print(f"❌ ОШИБКА ЗАПИСИ В SUPABASE: {db_err}")
+        logging.error(f"❌ ОШИБКА ЗАПИСИ В БД: {db_err}")
     finally:
         await conn.close()
 
@@ -133,7 +135,7 @@ async def process_incoming_feedback(comment: str, contact: str, place_id: str = 
                 reply_markup=complaint_action_keyboard(feedback_id),
                 parse_mode="HTML"
             )
-            print(f"✅ Уведомление #{feedback_id} отправлено в Telegram")
+            logging.info(f"✅ Уведомление #{feedback_id} отправлено в Telegram")
         except Exception as e:
             logging.error(f"❌ Ошибка отправки в Telegram: {e}")
 
@@ -372,7 +374,6 @@ async def process_report_period(callback: CallbackQuery):
     cat_inline = ", ".join([f"{c['category']} ({c['cnt']})" for c in categories])
     reviews_summary = "\n".join([f"- [{r['category']}] «{r['comment']}»" for r in recent_reviews])
 
-    # Изменили текст загрузки на более лаконичный
     await callback.message.edit_text(f"⏳ Готовлю аналитический отчёт по точке <b>{html.escape(str(place_title))}</b> ({period_title})...", parse_mode="HTML")
 
     report_prompt = (
@@ -466,9 +467,29 @@ async def process_status(callback: CallbackQuery):
         await callback.message.answer(f"Жалоба #{fid}: <b>{label}</b>", parse_mode="HTML")
     await callback.answer("Статус обновлен!")
 
+# --- ФОНОВЫЙ ПИНГЕР И ЛОГГЕР (АНТИ-СОН ДЛЯ RENDER) ---
+async def keep_alive():
+    ping_url = f"{RENDER_EXTERNAL_URL}/"
+    logging.info(f"🛡 Анти-сон активирован! Пингуем {ping_url} каждые 10 минут.")
+    while True:
+        await asyncio.sleep(600)  # 600 секунд = 10 минут
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(ping_url) as resp:
+                    logging.info(f"🔄 Keep-Alive пинг успешен: HTTP {resp.status}")
+        except Exception as e:
+            logging.warning(f"⚠️ Ошибка Keep-Alive пинга: {e}")
+
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    await init_db()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    try:
+        await init_db()
+    except Exception as e:
+        logging.error(f"⚠️ Ошибка подключения к БД при старте: {e}")
 
     app = web.Application(client_max_size=10 * 1024 * 1024)
     app.router.add_get("/", handle_health_check)
@@ -482,7 +503,10 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    print(f"🚀 API сервер запущен на порту {port} с подключением к Supabase!")
+    # Запускаем фоновый анти-сон
+    asyncio.create_task(keep_alive())
+
+    logging.info(f"🚀 API сервер запущен на порту {port}!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
