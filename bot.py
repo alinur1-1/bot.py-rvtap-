@@ -31,9 +31,9 @@ ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW and ADMIN_ID_RAW.isdigit() else 590
 MANAGERS = {
     "legenda": 5904604582,
     "default": 5904604582,
-    "voronka": 5904604582,
-    "teddys_coffee": 1046554693,
-    "mondo_coffee": 1046554693,
+    "cinnabon": 5904604582,
+    "basilic": 1046554693,
+    "urbo_timeryazeva": 1046554693,
 }
 
 bot = Bot(token=BOT_TOKEN)
