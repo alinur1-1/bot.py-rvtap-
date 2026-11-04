@@ -33,7 +33,7 @@ MANAGERS = {
     "default": 5904604582,
     "cinnabon": 5904604582,
     "basilic": 1046554693,
-    "urbo_timeryazeva": 1046554693,
+    "urbo_timeryazeva": 1370532781,
 }
 
 bot = Bot(token=BOT_TOKEN)
