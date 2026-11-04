@@ -14,6 +14,7 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from google import genai
+from google.genai import types as genai_types
 
 load_dotenv()
 
@@ -39,8 +40,22 @@ MANAGERS = {
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-GEMINI_MODEL = "gemini-3.8-flash"
+# Ограничиваем таймаут 25 секундами, чтобы SDK не зависал на 4 минуты при ошибке 503
+ai_client = (
+    genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=genai_types.HttpOptions(timeout=25000)
+    )
+    if GEMINI_API_KEY else None
+)
+
+# Цепочка моделей: если 3.8-flash перегружена (503), бот мгновенно переключится на следующую
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash"
+]
 
 recent_submissions = {}
 
@@ -242,7 +257,8 @@ async def cmd_start(message: types.Message):
         "👋 <b>Reviews Tap Analytics!</b>\n\n"
         "Система мониторинга негатива и жесткой бизнес-аналитики заведений.\n"
         "• 📊 Аналитика по точкам — сухие факты и антикризисный план.\n"
-        "• ⚠️ Открытые жалобы — список необработанных инцидентов.",
+        "• ⚠️ Открытые жалобы — список необработанных инцидентов.\n"
+        "• /my_id.",
         reply_markup=main_menu_keyboard(),
         parse_mode="HTML"
     )
@@ -313,12 +329,15 @@ async def cmd_stats_router(message: types.Message):
 
 @dp.callback_query(F.data.startswith("selplace_"))
 async def process_place_selection(callback: CallbackQuery):
+    await callback.answer()
     place_id = callback.data.replace("selplace_", "").lower()
     await callback.message.edit_text("🗓 Выберите период отчёта:", reply_markup=period_selection_keyboard(place_id))
-    await callback.answer()
 
 @dp.callback_query(F.data.startswith("rep_"))
 async def process_report_period(callback: CallbackQuery):
+    # Сразу отвечаем Telegram на коллбэк, чтобы не падало с "query is too old"
+    await callback.answer()
+
     parts = callback.data.split("_")
     place_id = "_".join(parts[1:-1]).lower()
     period = parts[-1]
@@ -367,7 +386,6 @@ async def process_report_period(callback: CallbackQuery):
 
     if total == 0:
         await callback.message.edit_text(f"📊 По точке <b>{html.escape(str(place_title))}</b> ({period_title}) обращений не найдено.", parse_mode="HTML")
-        await callback.answer()
         return
 
     cat_text = "\n".join([f"• {c['category']}: {c['cnt']} шт." for c in categories]) if categories else "Категории не определены."
@@ -391,16 +409,21 @@ async def process_report_period(callback: CallbackQuery):
 
     ai_text = "1. Зафиксированы операционные упущения.\n2. Требуется усилить контроль смен."
     if ai_client:
-        try:
-            response = await asyncio.to_thread(
-                ai_client.models.generate_content,
-                model=GEMINI_MODEL,
-                contents=report_prompt
-            )
-            if response.text:
-                ai_text = response.text.replace("**", "").replace("*", "•").replace("###", "").replace("##", "").strip()
-        except Exception as e:
-            logging.error(f"Ошибка Gemini аналитики: {e}")
+        for model_name in GEMINI_MODELS:
+            try:
+                response = await asyncio.to_thread(
+                    ai_client.models.generate_content,
+                    model=model_name,
+                    contents=report_prompt
+                )
+                if response and response.text:
+                    ai_text = response.text.replace("**", "").replace("*", "•").replace("###", "").replace("##", "").strip()
+                    logging.info(f"✅ Аналитика успешно сгенерирована через {model_name}")
+                    break
+            except Exception as e:
+                logging.warning(f"⚠️ Модель {model_name} вернула ошибку ({e}), переключаюсь на резервную...")
+    else:
+        logging.error("❌ GEMINI_API_KEY не задан!")
 
     resolved_count = total - unresolved
     report = (
@@ -412,7 +435,6 @@ async def process_report_period(callback: CallbackQuery):
     if len(report) > 4000:
         report = report[:4000] + "..."
     await callback.message.answer(report, parse_mode="HTML")
-    await callback.answer()
 
 @dp.message(F.text == "⚠️ Открытые жалобы")
 @dp.message(Command("open"))
@@ -447,6 +469,7 @@ async def cmd_open(message: types.Message):
 
 @dp.callback_query(F.data.startswith("status_"))
 async def process_status(callback: CallbackQuery):
+    await callback.answer("Статус обновлен!")
     action, fid = callback.data.split("_")[1], int(callback.data.split("_")[2])
     new_status = "связались" if action == "contacted" else "закрыто"
 
@@ -465,7 +488,6 @@ async def process_status(callback: CallbackQuery):
         )
     except Exception:
         await callback.message.answer(f"Жалоба #{fid}: <b>{label}</b>", parse_mode="HTML")
-    await callback.answer("Статус обновлен!")
 
 # --- ФОНОВЫЙ ПИНГЕР И ЛОГГЕР (АНТИ-СОН ДЛЯ RENDER) ---
 async def keep_alive():
